@@ -6,6 +6,12 @@ FEBID仿真主程序 - 优化版
 Author: 刘宇
 Date: 2025/7
 """
+import os
+
+# 在导入其他模块之前设置环境变量，适配NW服务器56核112线程
+os.environ['NUMBA_NUM_THREADS'] = '50'
+os.environ['OMP_NUM_THREADS'] = '50'
+os.environ['MKL_NUM_THREADS'] = '50'
 
 import sys
 import argparse
