@@ -176,7 +176,7 @@ class MemoryOptimizedFEBID:
         # 初始前驱体覆盖度
         p = self.physical_params
         n_eq = p.k * p.Phi * p.tau * p.n0 / (1 + p.k * p.Phi * p.tau)
-        n_surface = np.full_like(X_mesh, n_eq, dtype=FLOAT_DTYPE)
+        n_surface = np.zeros_like(X_mesh, dtype=np.float32)
 
         self.X_mesh = X_mesh
         self.Y_mesh = Y_mesh
