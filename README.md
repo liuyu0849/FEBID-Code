@@ -1,13 +1,13 @@
 ## FEBID实验参数测量总结
 
-### 表1：中心点沉积实验
+### 表1：中心点沉积实验（修正版）
 
-| 实验类型 | 测量内容 | 数学关系 |
-|----------|----------|----------|
-| **中心点高度vs时间实验**<br>固定电子束于一点<br>记录高度随时间变化 | 长时间线性段斜率A<br>(t > 3t_c) | $A = \Delta V \cdot \sigma \cdot f_0 \cdot n_{ss}$<br>其中steady state覆盖度 $n_{ss} = \frac{k \cdot \Phi}{1/\tau + k \cdot \Phi/n_0 + \sigma \cdot f_0}$ |
-| | 长时间线性段截距B | $B = \Delta V \cdot \sigma \cdot f_0 \cdot (n_{eq} - n_{ss}) \cdot t_c$<br>其中无电子束平衡覆盖度 $n_{eq} = \frac{k \cdot \Phi}{1/\tau + k \cdot \Phi/n_0}$ |
-| | 过渡区曲线与稳态直线的偏差<br>$\Delta h(t_1)$, $\Delta h(t_2)$等多个点 | $t_c = \frac{t_2 - t_1}{\ln[\|\Delta h(t_1)\|/\|\Delta h(t_2)\|]}$<br>其中特征时间 $t_c = \frac{1}{k \cdot \Phi/n_0 + 1/\tau + \sigma \cdot f_0}$ |
-| | 初始段斜率${v_0}$ <br>($t < 0.5t_c$) | $v_0 = \Delta V \cdot \sigma \cdot f_0 \cdot n_{eq}$ |
+| 实验类型                  | 测量内容                     | 数学关系                                                                 |
+|---------------------------|------------------------------|--------------------------------------------------------------------------|
+| **中心点高度vs时间实验**<br>（固定电子束于一点，记录高度随时间变化） | **稳态沉积速率**<br>长时间线性段斜率 $A$<br>（$t > 3t_c$） | $$A = \Delta V \cdot \sigma \cdot f_0 \cdot n_{ss}$$<br>稳态覆盖度：<br>$$n_{ss} = \frac{k \Phi}{ \sigma f_0 + \frac{1}{\tau} + \frac{k \Phi}{n_0} }$$ |
+|                           | **稳态偏移量**<br>长时间线性段截距 $B$ | $$B = \Delta V \cdot \sigma \cdot f_0 \cdot (n_{eq} - n_{ss}) \cdot t_c$$<br>平衡覆盖度：<br>$$n_{eq} = \frac{k \Phi}{ \frac{1}{\tau} + \frac{k \Phi}{n_0} }$$ |
+|                           | **动力学特征时间**<br>过渡区曲线与稳态直线的偏差<br>（测量$\Delta h(t_1)$, $\Delta h(t_2)$等） | 特征时间计算：<br>$$t_c = \frac{t_2 - t_1}{\ln[\Delta h(t_1)/\Delta h(t_2)]}$$<br>理论表达式：<br>$$t_c = \frac{1}{ \sigma f_0 + \frac{1}{\tau} + \frac{k \Phi}{n_0} }$$ |
+|                           | **初始沉积速率**<br>初始段斜率 $v_0$<br>（$t < 0.5t_c$） | $$v_0 = \Delta V \cdot \sigma \cdot f_0 \cdot n_{eq}$$ |
 
 ### 表2：形貌演化实验
 
