@@ -4,10 +4,10 @@
 
 | 实验类型 | 测量内容 | 数学关系 |
 |----------|----------|----------|
-| **中心点高度vs时间实验**<br>固定电子束于一点<br>记录高度随时间变化 | 长时间线性段斜率A<br>(t > 3t_c) | $A = \frac{\Delta V \cdot \sigma \cdot f_0 \cdot n_0 \cdot k \cdot \Phi \cdot \tau}{1 + k \cdot \Phi \cdot \tau + \sigma \cdot f_0 \cdot \tau}$ |
-| | 长时间线性段截距B | $B = \frac{\Delta V \cdot \sigma \cdot f_0 \cdot n_0 \cdot k \cdot \Phi \cdot \tau^2 \cdot \sigma \cdot f_0}{(1 + k \cdot \Phi \cdot \tau)(1 + k \cdot \Phi \cdot \tau + \sigma \cdot f_0 \cdot \tau)}$ |
+| **中心点高度vs时间实验**<br>固定电子束于一点<br>记录高度随时间变化 | 长时间线性段斜率A<br>(t > 3t_c) | $A = \Delta V \cdot \sigma \cdot f_0 \cdot n_{ss}$<br>其中 $n_{ss} = \frac{n_0 \cdot k \cdot \Phi \cdot \tau}{1 + k \cdot \Phi \cdot \tau + \sigma \cdot f_0 \cdot \tau}$ |
+| | 长时间线性段截距B | $B = \Delta V \cdot \sigma \cdot f_0 \cdot (n_{eq} - n_{ss}) \cdot t_c$<br>其中 $n_{eq} = \frac{n_0 \cdot k \cdot \Phi \cdot \tau}{1 + k \cdot \Phi \cdot \tau}$ |
 | | 过渡区曲线与稳态直线的偏差<br>$\Delta h(t_1)$, $\Delta h(t_2)$等多个点 | $t_c = \frac{t_2 - t_1}{\ln[\|\Delta h(t_1)\|/\|\Delta h(t_2)\|]}$<br>其中 $t_c = \frac{1}{k \cdot \Phi/n_0 + 1/\tau + \sigma \cdot f_0}$ |
-| | 初始段斜率$v_0$<br>($t < 0.5t_c$) | $v_0 = \frac{\Delta V \cdot \sigma \cdot f_0 \cdot n_0 \cdot k \cdot \Phi \cdot \tau}{1 + k \cdot \Phi \cdot \tau}$ |
+| | 初始段斜率$v_0$<br>($t < 0.5t_c$) | $v_0 = \Delta V \cdot \sigma \cdot f_0 \cdot n_{eq}$ |
 
 ### 表2：形貌演化实验
 
