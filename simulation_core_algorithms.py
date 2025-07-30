@@ -201,15 +201,18 @@ def rk4_step_parallel(n_old, f_surface, dt, k_phi_n0, tau_inv, sigma, n0_inv,
 
 
 @jit(nopython=True, fastmath=True)
-def exponential_slope_decay(slope, slope_min=0.1, slope_max=10.0):
+def exponential_slope_enhancement(slope, slope_min=0.1, slope_max=10.0):
+    # 斜率增强效应：斜率越大，返回值越大
     if slope <= slope_min:
-        return 1.0
+        return 1.0  # 平坦表面保持原始通量
     elif slope >= slope_max:
-        return 0.0
+        max_enhancement = 3.0  # 最大增强倍数
+        return max_enhancement
     else:
-        min_value = 1e-6
-        k = -np.log(min_value) / (slope_max - slope_min)
-        return np.exp(-k * (slope - slope_min))
+        # 指数增长，从1增长到max_enhancement
+        max_enhancement = 5.0
+        k = np.log(max_enhancement) / (slope_max - slope_min)
+        return np.exp(k * (slope - slope_min))
 
 
 @jit(nopython=True, parallel=True, fastmath=True)
@@ -254,7 +257,7 @@ def apply_surface_effects_numba(f_surface, h_surface, weight_substrate, weight_d
 
             surface_gradient = np.sqrt(grad_x * grad_x + grad_y * grad_y)
             #指数斜率衰减
-            flux_decay_factor = exponential_slope_decay(surface_gradient,
+            flux_decay_factor = exponential_slope_enhancement(surface_gradient,
                                                         slope_min, slope_max)
 
             # 深度因子
