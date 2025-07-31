@@ -98,8 +98,8 @@ SIMULATION_CONFIG = {
     },
 
     'surface_effects': {
-        'depth_scale_factor': 5,         # 深度效应
-        'slope_decay_min': 0.0000001,          # 指数衰减开始斜率
+        'depth_scale_factor': 1,         # 深度效应
+        'slope_decay_min': 1,          # 指数衰减开始斜率
         'slope_decay_max': 10.0,         # 指数衰减结束斜率
     },
 
