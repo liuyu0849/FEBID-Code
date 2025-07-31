@@ -202,17 +202,78 @@ def rk4_step_parallel(n_old, f_surface, dt, k_phi_n0, tau_inv, sigma, n0_inv,
 
 @jit(nopython=True, fastmath=True)
 def exponential_slope_enhancement(slope, slope_min=0.1, slope_max=10.0):
-    # 斜率增强效应：斜率越大，返回值越大
-    if slope <= slope_min:
-        return 1.0  # 平坦表面保持原始通量
-    elif slope >= slope_max:
-        max_enhancement = 3.0  # 最大增强倍数
-        return max_enhancement
+    """
+    斜率增强效应：基于物理的分段函数
+    - 0.1 ~ 5.6: 使用 1/cos(ax+b) 形式
+    - 5.6 ~ tan(85°): 线性增长到90%
+    - tan(85°) ~ tan(89°): 线性下降到1%
+    - > tan(89°): 返回0
+
+    注：保留slope_max参数以保持接口兼容性，但实际使用固定的分段点
+    """
+    # 关键斜率点
+    slope_transition1 = 5.6
+    slope_85deg = 11.43  # np.tan(np.radians(85))
+    slope_89deg = 57.29  # np.tan(np.radians(89))
+
+    # 增强上限
+    target_value_at_5_6 = 2.5
+
+    if slope < slope_min:
+        return 1.0
+
+    # 第一段：0.1 到 5.6，使用 1/cos(ax+b) 形式
+    elif slope_min <= slope <= slope_transition1:
+        # 计算参数a和b
+        # arccos(1/2.5) ≈ 1.159279
+        a = 1.159279 / 5.5  # ≈ 0.2108
+        b = -0.1 * a  # ≈ -0.02108
+
+        # 计算增强因子
+        cos_arg = a * slope + b
+        cos_value = np.cos(cos_arg)
+
+        # 避免除零错误
+        if abs(cos_value) < 1e-10:
+            return target_value_at_5_6
+        return 1.0 / cos_value
+
+    # 第二段：tan(80°) 到 tan(85°)，线性增长到前一段终值的90%
+    elif slope_transition1 < slope <= slope_85deg:
+        # 计算5.6处的值（应该接近2.5）
+        a = 1.159279 / 5.5
+        b = -0.1 * a
+        cos_val = np.cos(a * slope_transition1 + b)
+        if abs(cos_val) < 1e-10:
+            value_at_5_6 = target_value_at_5_6
+        else:
+            value_at_5_6 = 1.0 / cos_val
+
+        # 线性插值
+        value_at_85deg = value_at_5_6 * 0.9
+        t = (slope - slope_transition1) / (slope_85deg - slope_transition1)
+        return value_at_5_6 + t * (value_at_85deg - value_at_5_6)
+
+    # 第三段：tan(85°) 到 tan(89°)，线性下降到1%
+    elif slope_85deg < slope <= slope_89deg:
+        # 计算tan(85°)处的值
+        a = 1.159279 / 5.5
+        b = -0.1 * a
+        cos_val = np.cos(a * slope_transition1 + b)
+        if abs(cos_val) < 1e-10:
+            value_at_5_6 = target_value_at_5_6
+        else:
+            value_at_5_6 = 1.0 / cos_val
+        value_at_85deg = value_at_5_6 * 0.9
+
+        # 线性插值下降到1%
+        value_at_89deg = value_at_85deg * 0.01
+        t = (slope - slope_85deg) / (slope_89deg - slope_85deg)
+        return value_at_85deg + t * (value_at_89deg - value_at_85deg)
+
+    # 第四段：大于tan(89°)
     else:
-        # 指数增长，从1增长到max_enhancement
-        max_enhancement = 5.0
-        k = np.log(max_enhancement) / (slope_max - slope_min)
-        return np.exp(k * (slope - slope_min))
+        return 0.0   #使用三段函数
 
 
 @jit(nopython=True, parallel=True, fastmath=True)
