@@ -24,4 +24,4 @@
 | **γ的定义**             | $\gamma = \frac{L_{\text{eff}}}{r_b} = \frac{ 2\sqrt{ \frac{D}{1/\tau + \sigma \cdot f_0} } }{FWHM}$ | $L_{\text{eff}}$：有效扩散长度（前驱体扩散特征距离）<br>$r_b$：电子束斑半径<br>**物理意义**：特征值，决定火山口的形貌特点，值越大，火山口越深，宽度越窄 |
 | **火山口形貌条件**      | $$\tilde{\tau} > 10, \gamma > 0.5 $$                         | 中心浓度足够低，扩散系数较快。扩散很慢则遵循高斯分布或平顶形状；扩散太快则依然遵循高斯分布|
 | **高斯→火山口转变时间** | $t_{\text{transition}} = \frac{FWHM^2}{D}$ | **扩散特征时间**<br>与γ无关（火山口形貌下）<br>**物理意义**：前驱体扩散穿越束斑所需时间，此时最高处不再是中心 |
-| **火山口半径**          | $r_{\text{crater}} \approx \frac{FWHM}{2.355} \sqrt{\ln\left(\frac{\tilde{\tau}}{1 + 2\gamma^{3/2}}\right)}$ | **条件**： $\gamma$ 增大，半径减小，  $\tilde{\tau}$增大，半径增大 |
+| **火山口半径**          | $r_{\text{crater}} \approx \frac{FWHM}{2.355} \sqrt{\ln\left(\frac{\tilde{\tau}}{1 + 2\gamma^{3/2}}\right)}$ | **条件**： $\gamma$ 增大，半径减小， $\tilde{\tau}$增大，半径增大 |
