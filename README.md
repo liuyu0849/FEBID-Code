@@ -10,8 +10,8 @@
 |  | **稳态与初始速率比值** | $\frac{A}{v_0} = \frac{n_{ss}}{n_{eq}} = \frac{1}{\tilde{\tau}}$ |
 
 **关键参数表达式：**
-- $n_{eq} = \frac{k \cdot \Phi}{1/\tau + k \cdot \Phi/n_0}$
-- $n_{ss} = \frac{k \cdot \Phi}{1/\tau + k \cdot \Phi/n_0 + \sigma \cdot f_0}$
+- $n_{eq} = \frac{k \cdot \Phi}{1/\tau + k \cdot \Phi/n_0}$ 无电子束作用下表面平衡浓度
+- $n_{ss} = \frac{k \cdot \Phi}{1/\tau + k \cdot \Phi/n_0 + \sigma \cdot f_0}$ 电子束作用下中心点平衡浓度
 - $\tilde{\tau} = n_{eq}/n_{ss} = 1 + \frac{\sigma \cdot f_0 \cdot \tau}{1 + k \cdot \Phi \cdot \tau/n_0}$。物理意义是初始沉积速率与稳态沉积速率的比值，反映了电子消耗对沉积过程的影响程度。
 - $t_c = \frac{1}{k \cdot \Phi/n_0 + 1/\tau + \sigma \cdot f_0}$
 
