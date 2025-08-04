@@ -1,13 +1,12 @@
 ### 表1：中心点沉积实验
-
 | 实验类型 | 测量内容 | 数学关系 |
 |:--------:|----------|----------|
-| <br><br>**中心点高度vs时间实验**<br><br><br><br> | <br><br>**参数定义**<br><br><br><br> | <br><br>$\tilde{\tau} = \frac{n_{eq}}{n_{ss}} = 1 + \frac{\sigma \cdot f_0}{1/\tau + k \cdot \Phi/n_0}$<br><br><br><br> |
-| <br><br><br>固定电子束于一点<br><br><br>记录高度随时间变化<br><br><br><br> | <br><br>长时间线性段斜率A<br><br>(t > 3t_c)<br><br><br><br> | <br><br>$A = \Delta V \cdot \sigma \cdot f_0 \cdot n_{ss}$<br><br>或 $A = \frac{\Delta V \cdot \sigma \cdot f_0 \cdot n_{eq}}{\tilde{\tau}}$<br><br><br><br> |
-| <br><br><br><br><br><br><br><br> | <br><br>长时间线性段截距B<br><br><br><br><br><br> | <br><br>$B = \Delta V \cdot \sigma \cdot f_0 \cdot (n_{eq} - n_{ss}) \cdot t_c$<br><br>或 $B = \Delta V \cdot \sigma \cdot f_0 \cdot n_{ss} \cdot (\tilde{\tau} - 1) \cdot t_c$<br><br><br><br> |
-| <br><br><br><br><br><br><br><br> | <br><br>过渡区曲线与稳态直线的偏差<br><br>$\Delta h(t_1)$, $\Delta h(t_2)$等多个点<br><br><br><br> | <br><br>$t_c = \frac{t_2 - t_1}{\ln[\|\Delta h(t_1)\|/\|\Delta h(t_2)\|]}$<br><br><br><br><br><br> |
-| <br><br><br><br><br><br><br><br> | <br><br>**初始沉积速率**<br><br>初始段斜率 $v_0$<br><br><br><br> | <br><br>$v_0 = \Delta V \cdot \sigma \cdot f_0 \cdot n_{eq}$<br><br>或 $v_0 = A \cdot \tilde{\tau}$<br><br><br><br> |
-| <br><br><br><br><br><br><br><br> | <br><br>**稳态与初始速率比值**<br><br><br><br><br><br> | <br><br>$\frac{A}{v_0} = \frac{n_{ss}}{n_{eq}} = \frac{1}{\tilde{\tau}}$<br><br><br><br><br><br> |
+| 中心点高度vs时间实验 | 参数定义 | $\tilde{\tau} = \frac{n{eq}}{n{ss}} = 1 + \frac{\sigma \cdot f_0}{1/\tau + k \cdot \Phi/n_0}$ |
+| <br>固定电子束于一点<br><br>记录高度随时间变化 | 长时间线性段斜率A<br>(t > 3t_c) | $A = \Delta V \cdot \sigma \cdot f0 \cdot n{ss}$<br>或 $A = \frac{\Delta V \cdot \sigma \cdot f0 \cdot n{eq}}{\tilde{\tau}}$ |
+|  | 长时间线性段截距B | $B = \Delta V \cdot \sigma \cdot f0 \cdot (n{eq} - n_{ss}) \cdot t_c$<br>或 $B = \Delta V \cdot \sigma \cdot f0 \cdot n{ss} \cdot (\tilde{\tau} - 1) \cdot t_c$ |
+|  | 过渡区曲线与稳态直线的偏差<br>$\Delta h(t_1)$, $\Delta h(t_2)$等多个点 | $t_c = \frac{t_2 - t_1}{\ln[\|\Delta h(t_1)\|/\|\Delta h(t_2)\|]}$<br>  |
+|  | 初始沉积速率<br>初始段斜率 $v_0$ | $v_0 = \Delta V \cdot \sigma \cdot f0 \cdot n{eq}$<br>或 $v_0 = A \cdot \tilde{\tau}$ |
+|  | 稳态与初始速率比值 | $\frac{A}{v0} = \frac{n{ss}}{n_{eq}} = \frac{1}{\tilde{\tau}}$ |
 
 **关键参数表达式：**
 - $n_{eq} = \frac{k \cdot \Phi}{1/\tau + k \cdot \Phi/n_0}$ 无电子束作用下表面平衡浓度
