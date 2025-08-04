@@ -20,7 +20,7 @@
 - $n_{eq} = \frac{k \cdot \Phi}{1/\tau + k \cdot \Phi/n_0}$ 无电子束作用下表面平衡浓度
 - $n_{ss} = \frac{k \cdot \Phi}{1/\tau + k \cdot \Phi/n_0 + \sigma \cdot f_0}$ 电子束作用下中心点平衡浓度
 - $\tilde{\tau} = n_{eq}/n_{ss} = 1 + \frac{\sigma \cdot f_0 \cdot \tau}{1 + k \cdot \Phi \cdot \tau/n_0}$。反映了电子消耗对沉积过程的影响程度，比值越大，中心点前驱体耗尽越强。
-- $t_c = \frac{1}{k \cdot \Phi/n_0 + 1/\tau + \sigma \cdot f_0}$
+- $t_c = \frac{1}{k \cdot \Phi/n_0 + 1/\tau + \sigma \cdot f_0}$，代表沉积开始转变成稳态的时间节点。在3 $t_c$时，沉积变为稳态沉积。
 - $\tilde{\tau}$ > 10 是形成火山口的必要条件，此时形貌具有演变成火山口的潜力。在此基础上，若 $\gamma$ > 0.5，则形成火山口，且越大火山口越深。电子束的FWHM只和  $\tilde{\tau}$相关；但是深度和半径均和 $\tilde{\tau}$，  $\gamma$ 相关。
 - **由  $\tilde{\tau}$， $\gamma$可以完全描述一个单点沉积过程**
 
