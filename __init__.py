@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """
-FEBID仿真包初始化文件 - 更新版
-修改导入路径以适配拆分后的文件结构
+FEBID仿真包初始化文件 - 精简版（无监控）
+删除所有监控相关导入
 
 Author: 刘宇
 Date: 2025/7
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.0-simplified"
 __author__ = "刘宇"
-__description__ = "FEBID仿真系统 - 优化版"
+__description__ = "FEBID仿真系统 - 精简版（无监控）"
 
-# 核心模块导入 - 更新导入路径
-from config import calculate_dynamic_visualization_ranges
+# 核心模块导入
 from .substrate_geometry import (
     SubstrateGeometryGenerator, RectangularDefect, SubstrateGeometry,
     validate_substrate_geometry_config, create_example_substrate_config
 )
 from .base_classes import (
-    BaseMonitor, ScanStrategy, ConfigValidator,
+    ScanStrategy, ConfigValidator,
     calculate_surface_statistics, compute_edge_mask_parallel
 )
-# 更新：从拆分后的文件导入
 from .simulation_core_main import MemoryOptimizedFEBID
-from .realtime_monitor import FixedRangeRealTimeMonitor, RealTimeWebMonitor
 from .scan_strategies import ScanPathGenerator
 from .visualization_analysis import VisualizationAnalyzer
 from .data_structures import (
@@ -32,24 +29,21 @@ from .data_structures import (
 )
 from .config import (
     SIMULATION_CONFIG,
-    validate_config, validate_visualization_config,
+    validate_config,
     print_config_summary
 )
 
 # 便捷函数导入
 from .main import main_with_custom_config, FEBIDSimulationRunner
 
-# 公开API - 更新版
+# 公开API - 精简版
 __all__ = [
     # 基础类
-    'BaseMonitor',
     'ScanStrategy',
     'ConfigValidator',
 
     # 核心类
     'MemoryOptimizedFEBID',
-    'FixedRangeRealTimeMonitor',
-    'RealTimeWebMonitor',
     'ScanPathGenerator',
     'VisualizationAnalyzer',
     'FEBIDSimulationRunner',
@@ -61,13 +55,12 @@ __all__ = [
     'PhysicalParams',
     'ScanInfo',
     'FLOAT_DTYPE',
-    'calculate_dynamic_visualization_ranges',
 
     # 配置
     'SIMULATION_CONFIG',
+
     # 工具函数
     'validate_config',
-    'validate_visualization_config',
     'print_config_summary',
     'main_with_custom_config',
     'calculate_surface_statistics',
@@ -98,7 +91,7 @@ def get_version():
 def get_info():
     """获取包信息"""
     return {
-        'name': 'FEBID Simulation (Optimized)',
+        'name': 'FEBID Simulation (Simplified)',
         'version': __version__,
         'author': __author__,
         'description': __description__,
@@ -107,14 +100,14 @@ def get_info():
             '多循环/子循环扫描策略',
             '边缘重复扫描补偿',
             '反应-扩散方程RK4求解',
-            '可选实时监控功能',
             '内存优化和进度监控',
             '精简的数据保存和可视化',
             '✨ 优化：Numba并行计算',
             '✨ 优化：表面感知通量计算',
             '✨ 优化：连续衰减模型',
             '🏗️ 自定义基底几何支持',
-            '📐 矩形缺陷/凸起定义'
+            '📐 矩形缺陷/凸起定义',
+            '⚡ 精简版：无监控开销，更快的计算速度'
         ]
     }
 
@@ -122,7 +115,7 @@ def get_info():
 def quick_start_example():
     """快速开始示例"""
     example_code = '''
-# FEBID仿真快速开始示例 - 精简版
+# FEBID仿真快速开始示例 - 精简版（无监控）
 
 # 方法1: 使用默认配置
 from febid_simulation import FEBIDSimulationRunner
@@ -131,15 +124,13 @@ runner = FEBIDSimulationRunner()
 results = runner.run()
 
 # 方法2: 使用便捷函数
-from febid_simulation import main_with_custom_config, SIMULATION_CONFIG, VISUALIZATION_CONFIG
+from febid_simulation import main_with_custom_config, SIMULATION_CONFIG
 
 results = main_with_custom_config(
-    sim_config=SIMULATION_CONFIG,
-    viz_config=VISUALIZATION_CONFIG,
-    enable_monitor=True
+    sim_config=SIMULATION_CONFIG
 )
 
-# 方法3: 直接使用仿真类（推荐）
+# 方法3: 直接使用仿真类
 from febid_simulation import MemoryOptimizedFEBID
 
 # 自定义配置
@@ -173,19 +164,14 @@ custom_config = {
             'gaussian4': {'sigma': 8, 'amplitude': 0.20e+7},
         },
     },
-    'surface_effects': {'gradient_factor': 0.1, 'depth_scale_factor': 5},
+    'surface_effects': {'depth_scale_factor': 5, 'slope_decay_min': 0.1, 'slope_decay_max': 10.0},
     'surface_propagation': {'enable': True},
     'numerical': {'dt': 1e-7},
-    'output': {'create_plots': True, 'save_core_results': True, 'verbose': True},
-    'monitoring': {'enable_realtime_monitor': True, 'monitor_save_interval': 50, 'use_realtime_mode': True}
+    'output': {'create_plots': True, 'save_core_results': True, 'verbose': True}
 }
 
-# 创建仿真对象（精简版 - 默认使用Numba）
-febid = MemoryOptimizedFEBID(
-    config=custom_config,
-    enable_realtime_monitor=True,
-    use_realtime_mode=True
-)
+# 创建仿真对象
+febid = MemoryOptimizedFEBID(config=custom_config)
 
 # 运行仿真
 results = febid.run_simulation()
@@ -199,7 +185,7 @@ print(f"仿真时间: {results['simulation_time']:.2f} 秒")
 
 
 # 启动信息
-print(f"🔬 FEBID仿真包 v{__version__} 已加载 (精简版)")
+print(f"🔬 FEBID仿真包 v{__version__} 已加载 (精简版 - 无监控)")
 print(f"📖 使用 help(febid_simulation.get_info) 查看详细信息")
 print(f"🚀 使用 print(febid_simulation.quick_start_example()) 查看快速开始示例")
-print(f"✨ 精简版特性: 纯Numba并行、表面感知通量、连续衰减模型")
+print(f"⚡ 精简版特性: 无监控开销，更快的计算速度")
