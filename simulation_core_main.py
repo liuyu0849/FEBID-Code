@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-FEBID仿真主控制器 - 精简版
-删除所有备用方法，只使用Numba并行计算
+FEBID仿真主控制器 - 精简版（无监控）
+添加了subloop间前驱体浓度重置功能
 
 Author: 刘宇
 Date: 2025/7
@@ -17,7 +17,6 @@ from data_structures import (
     PhysicalParams, ScanInfo, FLOAT_DTYPE
 )
 from base_classes import ConfigValidator
-from realtime_monitor import RealTimeWebMonitor, FixedRangeRealTimeMonitor
 from scan_strategies import ScanPathGenerator
 from visualization_analysis import VisualizationAnalyzer
 from simulation_core_algorithms import (
@@ -25,24 +24,18 @@ from simulation_core_algorithms import (
     rk4_step_parallel,
     apply_surface_effects_numba
 )
-from config import calculate_dynamic_visualization_ranges
+
 
 class MemoryOptimizedFEBID:
-    """内存优化的FEBID仿真类 - 精简版（只使用Numba并行）"""
+    """内存优化的FEBID仿真类 - 精简版（无监控）"""
 
-    def __init__(self, config: Dict, enable_realtime_monitor: bool = None,
-                 monitor_save_interval: int = None, visualization_config: Dict = None,
-                 use_realtime_mode: bool = None):
+    def __init__(self, config: Dict):
         """初始化仿真参数"""
         self.config = config
         self.physical_params = self._create_physical_params()
         self.quad_gaussian_params = self._create_quad_gaussian_params()
         self.scan_history = []
         self.start_time = None
-
-        # 监控配置
-        self._setup_monitoring(enable_realtime_monitor, monitor_save_interval,
-                               use_realtime_mode)
 
         # 初始化辅助模块
         self.scan_generator = ScanPathGenerator(config)
@@ -53,48 +46,36 @@ class MemoryOptimizedFEBID:
         self.surface_config = config.get('surface_propagation', {})
         self.enable_surface_propagation = self.surface_config.get('enable', False)
 
+        # 前驱体浓度重置配置
+        self.reset_precursor_between_loops = config['scan'].get('reset_precursor_between_loops', False)
+        self.reset_precursor_between_subloops = config['scan'].get('reset_precursor_between_subloops', False)
+
         # 预处理参数（默认启用Numba）
         self._prepare_numba_params()
         self._prepare_rk4_constants()
 
-        print(f"✓ 仿真器初始化完成 {'(表面感知)' if self.enable_surface_propagation else '(2D模式)'}")
+        # 计算无电子束平衡浓度
+        self._calculate_equilibrium_concentration()
 
-    # simulation_core_main.py
-    def _setup_monitoring(self, enable_realtime_monitor, monitor_save_interval,
-                          use_realtime_mode):  # 删除 visualization_config 参数
-        """设置监控配置"""
-        monitor_config = self.config.get('monitoring', {})
+        # print(f"✓ 仿真器初始化完成 {'(表面感知)' if self.enable_surface_propagation else '(2D模式)'}")
+        if self.reset_precursor_between_loops:
+            print(f"✓ 循环间前驱体重置已启用 (平衡浓度: {self.n_equilibrium:.4f} molecules/nm²)")
+        if self.reset_precursor_between_subloops:
+            print(f"✓ 子循环间前驱体重置已启用 (平衡浓度: {self.n_equilibrium:.4f} molecules/nm²)")
 
-        # 计算动态范围（如果需要）
-        if monitor_config.get('height_range') == 'auto' or monitor_config.get('precursor_range') == 'auto':
-            from config import calculate_dynamic_visualization_ranges
-            dynamic_ranges = calculate_dynamic_visualization_ranges(self.config)
-
-            if monitor_config.get('height_range') == 'auto':
-                monitor_config['height_range'] = dynamic_ranges['height_range']
-            if monitor_config.get('precursor_range') == 'auto':
-                monitor_config['precursor_range'] = dynamic_ranges['precursor_range']
-
-        self.enable_realtime_monitor = (enable_realtime_monitor
-                                        if enable_realtime_monitor is not None
-                                        else monitor_config.get('enable_realtime_monitor', False))
-
-        self.monitor_save_interval = (monitor_save_interval
-                                      if monitor_save_interval is not None
-                                      else monitor_config.get('save_interval', 50))
-
-        self.use_realtime_mode = (use_realtime_mode
-                                  if use_realtime_mode is not None
-                                  else monitor_config.get('use_realtime_mode', True))
-
-        # 不再需要单独的 visualization_config
-        self.monitor = None
+    def _calculate_equilibrium_concentration(self):
+        """计算无电子束作用下的平衡前驱体浓度"""
+        # 在无电子束时，前驱体吸附和解吸达到平衡
+        # k * Phi * (1 - n/n0) = n/tau
+        # 解得: n_eq = k * Phi * tau * n0 / (1 + k * Phi * tau)
+        p = self.physical_params
+        self.n_equilibrium = p.k * p.Phi * p.tau * p.n0 / (p.n0 + p.k * p.Phi * p.tau)
 
     def _prepare_rk4_constants(self):
         """预计算RK4常量"""
         p = self.physical_params
         self.rk4_constants = {
-            'k_phi_n0': p.k * p.Phi * p.n0,
+            'k_phi': p.k * p.Phi,
             'tau_inv': 1.0 / p.tau,
             'sigma': p.sigma,
             'n0_inv': 1.0 / p.n0,
@@ -116,9 +97,6 @@ class MemoryOptimizedFEBID:
 
         # 初始化网格和表面
         x_grid, y_grid, h_surface, n_surface = self._initialize_simulation_grid()
-
-        # 初始化监控器
-        self.monitor = self._initialize_monitor(x_grid, y_grid)
 
         # 时间参数
         dt = self.config['numerical']['dt']
@@ -173,45 +151,13 @@ class MemoryOptimizedFEBID:
             h_surface = np.zeros_like(X_mesh, dtype=FLOAT_DTYPE)
             print("✓ 平面基底已加载")
 
-        # 初始前驱体覆盖度
-        p = self.physical_params
-        n_eq = p.k * p.Phi * p.tau * p.n0 / (1 + p.k * p.Phi * p.tau)
-        n_surface = np.zeros_like(X_mesh, dtype=np.float32)
+        # 初始前驱体覆盖度（使用平衡浓度）
+        n_surface = np.full_like(X_mesh, self.n_equilibrium, dtype=FLOAT_DTYPE)
 
         self.X_mesh = X_mesh
         self.Y_mesh = Y_mesh
 
         return x_grid, y_grid, h_surface, n_surface
-
-    def _initialize_monitor(self, x_grid, y_grid):
-        """初始化监控器"""
-        if not self.enable_realtime_monitor:
-            return None
-
-        monitor_config = self.config.get('monitoring', {})
-
-        # 确保监控配置包含可视化参数
-        if 'height_range' not in monitor_config or 'precursor_range' not in monitor_config:
-            print("⚠️  监控配置缺少可视化参数，使用默认值")
-            monitor_config['height_range'] = [0, 8e-4]
-            monitor_config['precursor_range'] = [0, 4e-4]
-
-        monitor_class = RealTimeWebMonitor if self.use_realtime_mode else FixedRangeRealTimeMonitor
-
-        monitor = monitor_class(
-            x_grid, y_grid,
-            self.config['geometry'],
-            monitor_config,  # 直接传递整个监控配置
-            save_interval=self.monitor_save_interval,
-            simulation_config=self.config
-        )
-
-        if self.use_realtime_mode and monitor.launch_realtime_viewer():
-            print("✅ 实时监控已启动")
-        elif not self.use_realtime_mode:
-            print("✅ 传统监控已准备")
-
-        return monitor
 
     def _display_config(self, scan_positions):
         """显示配置信息"""
@@ -224,16 +170,81 @@ class MemoryOptimizedFEBID:
     def _run_main_simulation_loop(self, scan_positions, scan_info, x_grid, y_grid,
                                   h_surface, n_surface, dt, dwell_time,
                                   edge_repeat_times, total_pixels):
-        """主仿真循环"""
+        """主仿真循环 - 支持循环和子循环间重置前驱体浓度"""
         current_subloop = 0
         pixels_in_current_subloop = 0
         rk4_const = self.rk4_constants
 
+        # 获取扫描配置
+        scan_config = self.config['scan']
+        pixel_size_x = scan_config['pixel_size_x']
+        pixel_size_y = scan_config['pixel_size_y']
+
+        # 计算循环参数
+        total_possible_steps = pixel_size_x * pixel_size_y  # 一个完整loop包含的subloop数
+        pixels_per_complete_loop = scan_info.base_pixels_per_subloop * total_possible_steps
+
+        # 跟踪当前位置
+        current_loop_number = 0
+        current_subloop_in_loop = 0  # 当前loop内的subloop索引
+        last_subloop_idx = 0
+        last_loop_number = 0
+
+        # 检查是否使用loop模式
+        using_loop_mode = scan_config.get('loop') is not None
+
         for pixel_idx in range(total_pixels):
-            # 子循环管理
-            if pixels_in_current_subloop == 0:
-                current_subloop += 1
+            # 获取当前subloop索引
+            current_pixel_subloop = scan_positions[pixel_idx, 2]
+
+            # 检测subloop变化
+            if current_pixel_subloop != last_subloop_idx:
+                # 新的subloop开始
+                if last_subloop_idx > 0:  # 不是第一个subloop
+                    # 计算当前loop编号
+                    if using_loop_mode:
+                        loop_num = (current_pixel_subloop - 1) // total_possible_steps + 1
+                        subloop_in_loop = (current_pixel_subloop - 1) % total_possible_steps + 1
+
+                        # 检测是否是新的loop开始
+                        if loop_num != last_loop_number and last_loop_number > 0:
+                            # 新的完整loop开始
+                            if self.reset_precursor_between_loops:
+                                n_surface.fill(self.n_equilibrium)
+                                print(f"🔄 Loop {loop_num} 开始，前驱体浓度已重置为平衡值")
+                            else:
+                                print(f"🔄 Loop {loop_num} 开始")
+                            current_loop_number = loop_num
+                            last_loop_number = loop_num
+
+                        # 检测是否需要在subloop间重置（独立判断）
+                        if self.reset_precursor_between_subloops:
+                            n_surface.fill(self.n_equilibrium)
+                            print(
+                                f"  📍 Loop {loop_num}, Subloop {subloop_in_loop}/{total_possible_steps}，前驱体浓度已重置")
+                    else:
+                        # subloop模式
+                        if self.reset_precursor_between_subloops:
+                            n_surface.fill(self.n_equilibrium)
+                            print(f"📍 Subloop {current_pixel_subloop} 开始，前驱体浓度已重置")
+                        else:
+                            print(f"📍 Subloop {current_pixel_subloop} 开始")
+
+                last_subloop_idx = current_pixel_subloop
+                current_subloop = current_pixel_subloop
                 pixels_in_current_subloop = scan_info.pixels_per_subloop
+
+            # 第一个subloop的特殊处理
+            if pixel_idx == 0:
+                current_subloop = 1
+                pixels_in_current_subloop = scan_info.pixels_per_subloop
+                last_subloop_idx = 1
+                if using_loop_mode:
+                    current_loop_number = 1
+                    last_loop_number = 1
+                    print(f"🔄 Loop 1 开始")
+                else:
+                    print(f"📍 Subloop 1 开始")
 
             # 获取扫描位置
             beam_pos_x = scan_positions[pixel_idx, 0]
@@ -252,7 +263,7 @@ class MemoryOptimizedFEBID:
                 # RK4步进
                 n_surface = rk4_step_parallel(
                     n_surface, f_surface, dt,
-                    rk4_const['k_phi_n0'], rk4_const['tau_inv'],
+                    rk4_const['k_phi'], rk4_const['tau_inv'],
                     rk4_const['sigma'], rk4_const['n0_inv'],
                     rk4_const['D_surf_factor'],
                     self.physical_params.dx, self.physical_params.dy,
@@ -260,18 +271,29 @@ class MemoryOptimizedFEBID:
                 )
 
                 # 更新高度
-                deposition_rate = self.physical_params.DeltaV * self.physical_params.sigma * f_surface * n_surface
-                h_surface += deposition_rate * dt
-                n_surface = np.clip(n_surface, 0, self.physical_params.n0)
+                scan_config = self.config['scan']
+                is_single_point = (scan_config['scan_x_start'] == scan_config['scan_x_end'] == 0 and
+                                   scan_config['scan_y_start'] == scan_config['scan_y_end'] == 0)
 
-            # 更新监控
-            self._update_monitoring(pixel_idx, h_surface, n_surface, beam_pos_x, beam_pos_y,
-                                    current_subloop, is_edge_repeat, total_pixels)
+                if is_single_point:
+                    scan_correction = 1.0  # 单点扫描不应用修正
+                else:
+                    scan_correction = self.config['physical'].get('scan_correction', 1.0)
+
+                deposition_rate = scan_correction * self.physical_params.DeltaV * self.physical_params.sigma * f_surface * n_surface
+                h_surface += deposition_rate * dt
+
+            # 记录历史（简化版：减少记录频率）
+            if pixel_idx % 100 == 0:  # 每100个点记录一次
+                self.scan_history.append([
+                    pixel_idx, pixel_idx + 1, beam_pos_x, beam_pos_y,
+                    np.max(h_surface), current_subloop, is_edge_repeat
+                ])
 
             pixels_in_current_subloop -= 1
 
-            # 进度显示
-            if pixel_idx % max(1, total_pixels // 20) == 0:
+            # 进度显示（简化版）
+            if pixel_idx % max(1, total_pixels // 10) == 0:
                 self._display_progress(pixel_idx + 1, total_pixels, h_surface,
                                        (beam_pos_x, beam_pos_y))
 
@@ -302,36 +324,27 @@ class MemoryOptimizedFEBID:
 
         return f_surface
 
-    def _apply_surface_effects_fixed(self, f_surface, h_surface):
-        """
-        应用连续表面效应 - 修复版本
-        """
+    def _apply_surface_effects(self, f_surface, h_surface):
+        """应用连续表面效应"""
         surface_params = self.config.get('surface_effects', {
-            'depth_scale_factor': 5,
             'slope_decay_min': 0.1,
             'slope_decay_max': 10.0,
-            'flux_min_factor': 0.01,
+            'enable_slope_enhancement': True,  # 默认启用
         })
 
-        # 获取新参数（移除gradient_factor）
-        depth_scale_factor = surface_params.get('depth_scale_factor', 5)
-        slope_min = surface_params.get('slope_decay_min', 0.1)
-        slope_max = surface_params.get('slope_decay_max', 10.0)
-        flux_min_factor = surface_params.get('flux_min_factor', 0.01)
-
-        # 计算材料权重
         weight_substrate, weight_deposit = self._calculate_material_weights(h_surface)
 
-        # 修复：正确获取sigma参数
+        # 获取sigma参数
         sub = self.quad_gaussian_params.substrate
         dep = self.quad_gaussian_params.deposit
 
         f_surface_final = apply_surface_effects_numba(
             f_surface, h_surface, weight_substrate, weight_deposit,
-            sub.gaussian1.sigma, dep.gaussian1.sigma,  # 修复：确保这些变量可用
-            depth_scale_factor,
+            sub.gaussian1.sigma, dep.gaussian1.sigma,
             self.physical_params.dx, self.physical_params.dy,
-            slope_min, slope_max, flux_min_factor  # 新参数
+            surface_params.get('slope_decay_min', 0.176),
+            surface_params.get('slope_decay_max', 10.0),
+            surface_params.get('enable_slope_enhancement', True)  # 新增参数传递
         )
 
         return np.maximum(f_surface_final, 0)
@@ -357,83 +370,18 @@ class MemoryOptimizedFEBID:
 
         return weight_substrate, weight_deposit
 
-    def _update_monitoring(self, pixel_idx, h_surface, n_surface, beam_pos_x, beam_pos_y,
-                           current_subloop, is_edge_repeat, total_pixels):
-        """更新监控"""
-        if self.enable_realtime_monitor and self.monitor is not None:
-            current_time = time.time() - self.start_time
-
-            if self.use_realtime_mode:
-                self.monitor.update_data(
-                    pixel_idx, h_surface, n_surface,
-                    (beam_pos_x, beam_pos_y), current_time,
-                    total_pixels, is_running=True
-                )
-            else:
-                self.monitor.record_frame(
-                    pixel_idx, h_surface, n_surface,
-                    (beam_pos_x, beam_pos_y), current_time
-                )
-
-        # 记录历史
-        self.scan_history.append([
-            pixel_idx, pixel_idx + 1, beam_pos_x, beam_pos_y,
-            np.max(h_surface), current_subloop, is_edge_repeat
-        ])
-
-    def _apply_surface_effects(self, f_surface, h_surface):
-        """应用连续表面效应"""
-        surface_params = self.config.get('surface_effects', {
-            'depth_scale_factor': 5,
-            'slope_decay_min': 0.1,
-            'slope_decay_max': 10.0,
-        })
-
-        weight_substrate, weight_deposit = self._calculate_material_weights(h_surface)
-
-        # 获取sigma参数
-        sub = self.quad_gaussian_params.substrate
-        dep = self.quad_gaussian_params.deposit
-
-        # 调用你现有的函数，但需要更新参数
-        f_surface_final = apply_surface_effects_numba(
-            f_surface, h_surface, weight_substrate, weight_deposit,
-            sub.gaussian1.sigma, dep.gaussian1.sigma,
-            surface_params.get('depth_scale_factor', 5),
-            self.physical_params.dx, self.physical_params.dy,
-            surface_params.get('slope_decay_min', 0.1),
-            surface_params.get('slope_decay_max', 10.0),
-        )
-
-        return np.maximum(f_surface_final, 0)
-
     def _display_progress(self, pixel_idx, total_pixels, h_surface, beam_pos):
-        """显示进度"""
-        if not hasattr(self, '_last_display_time'):
-            self._last_display_time = 0
+        """显示进度 - 简化版"""
+        progress_pct = pixel_idx / total_pixels * 100
+        max_height = np.max(h_surface)
+        memory_mb = psutil.Process().memory_info().rss / 1024 ** 2
 
-        current_time = time.time() - self.start_time
-
-        if (current_time - self._last_display_time) >= 2.0 or pixel_idx == total_pixels:
-            progress_pct = pixel_idx / total_pixels * 100
-            max_height = np.max(h_surface)
-            memory_mb = psutil.Process().memory_info().rss / 1024 ** 2
-
-            print(f"进度: {progress_pct:.1f}% | 最大高度: {max_height:.3e} nm | "
-                  f"位置: ({beam_pos[0]:.1f},{beam_pos[1]:.1f}) | 内存: {memory_mb:.1f}MB")
-
-            self._last_display_time = current_time
+        print(f"进度: {progress_pct:.0f}% | 最大高度: {max_height:.3e} nm | "
+              f"位置: ({beam_pos[0]:.1f},{beam_pos[1]:.1f}) | 内存: {memory_mb:.0f}MB")
 
     def _finalize_simulation(self, h_surface, n_surface, total_time, scan_info,
                              x_grid, y_grid, total_pixels):
         """完成仿真后处理"""
-        if self.enable_realtime_monitor and self.monitor is not None and self.use_realtime_mode:
-            current_time = time.time() - self.start_time
-            self.monitor.update_data(
-                total_pixels, h_surface, n_surface, (0, 0), current_time,
-                total_pixels, is_running=False
-            )
-
         # 打印结果
         self.visualizer.print_results(
             h_surface, n_surface, total_time, scan_info, x_grid, y_grid,
@@ -452,8 +400,7 @@ class MemoryOptimizedFEBID:
             'scan_history': np.array(self.scan_history),
             'scan_info': scan_info,
             'simulation_time': total_time,
-            'config': self.config,
-            'monitor': self.monitor
+            'config': self.config
         }
 
     # ========================================================================
@@ -526,28 +473,3 @@ class MemoryOptimizedFEBID:
     def save_results(self, results):
         """保存结果"""
         self.visualizer.save_results(results, self.physical_params, self.quad_gaussian_params)
-
-    def launch_realtime_viewer(self):
-        """启动实时查看器"""
-        if self.monitor is not None:
-            if self.use_realtime_mode:
-                if hasattr(self.monitor, 'server') and self.monitor.server:
-                    print(f"🌐 实时监控: http://localhost:{self.monitor.web_port}")
-                else:
-                    self.monitor.launch_realtime_viewer()
-            else:
-                self.monitor.launch_fixed_range_viewer()
-        else:
-            print("⚠️ 监控器未启用")
-
-    def stop_realtime_monitor(self):
-        """停止监控器"""
-        if self.monitor is not None and hasattr(self.monitor, 'stop_server'):
-            self.monitor.stop_server()
-            print("🛑 监控器已停止")
-
-    def __del__(self):
-        """清理资源"""
-        if hasattr(self, 'monitor') and self.monitor is not None:
-            if hasattr(self.monitor, 'close'):
-                self.monitor.close()
