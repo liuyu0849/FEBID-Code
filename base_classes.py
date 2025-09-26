@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-FEBID仿真基础类和工具函数
-提供共享功能以减少代码重复
+FEBID仿真基础类和工具函数 - 精简版（无监控）
+删除了BaseMonitor类
 
 Author: 刘宇
 Date: 2025/7
@@ -12,75 +12,6 @@ from abc import ABC, abstractmethod
 from typing import Dict, Tuple, Optional
 import json
 from numba import jit, prange
-
-
-class BaseMonitor(ABC):
-    """监控器基类，包含共享功能"""
-
-    @staticmethod
-    def generate_plot_config(width: int, height: int) -> Dict:
-        """生成通用图表配置"""
-        return {
-            'width': width,
-            'height': height,
-            'margin': {'l': 45, 'r': 80, 't': 50, 'b': 45},
-            'font': {'size': 11}
-        }
-
-    @staticmethod
-    def generate_colorbar_config(title: str, range_vals: list) -> Dict:
-        """生成优化的colorbar配置"""
-        return {
-            'title': {
-                'text': title,
-                'font': {'size': 12}
-            },
-            'titleside': 'right',
-            'tickformat': '.2e',
-            'exponentformat': 'e',
-            'nticks': 8,
-            'thickness': 12,
-            'len': 0.8,
-            'x': 1.02,
-            'tickfont': {'size': 10}
-        }
-
-    @staticmethod
-    def generate_common_styles() -> str:
-        """生成共享的CSS样式"""
-        return """
-        <style>
-            body { font-family: Arial, sans-serif; margin: 12px; background-color: #f5f5f5; }
-            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                      color: white; padding: 15px; border-radius: 10px; margin-bottom: 12px; text-align: center; }
-            .status { background-color: #e8f5e8; border: 2px solid #4CAF50; border-radius: 8px; 
-                      padding: 12px; margin: 12px 0; font-family: monospace; font-size: 13px; }
-            .container { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; 
-                         background-color: white; padding: 12px; border-radius: 10px; }
-            .plot-container { border: 2px solid #ddd; border-radius: 8px; margin: auto; }
-            .controls { grid-column: 1 / -1; text-align: center; margin: 12px 0; padding: 12px; 
-                        background-color: #fff3cd; border-radius: 10px; }
-            .button { background-color: #4CAF50; border: none; color: white; padding: 8px 16px; 
-                      margin: 3px; cursor: pointer; border-radius: 5px; font-size: 13px; }
-            .button.secondary { background-color: #17a2b8; }
-            .slider { width: 80%; height: 18px; margin: 8px; }
-            .status-indicator { display: inline-block; width: 12px; height: 12px; 
-                               border-radius: 50%; margin-right: 8px; }
-            .status-running { background-color: #4CAF50; animation: pulse 2s infinite; }
-            .status-stopped { background-color: #f44336; }
-            @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-        </style>
-        """
-
-    @abstractmethod
-    def update_data(self, *args, **kwargs):
-        """更新监控数据"""
-        pass
-
-    @abstractmethod
-    def launch_viewer(self):
-        """启动查看器"""
-        pass
 
 
 class ScanStrategy(ABC):
