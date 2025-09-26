@@ -148,45 +148,16 @@ def calculate_quad_gaussian_flux_numba(X_flat, Y_flat, h_flat, beam_pos_x, beam_
     return f_surface
 
 
-@jit(nopython=True, parallel=True, fastmath=True)
-def compute_area_factors(h_surface, dx, dy):
-    """计算每个网格点的表面积增大因子"""
-    ny, nx = h_surface.shape
-    area_factors = np.ones_like(h_surface)
-
-    for i in prange(1, ny - 1):
-        for j in range(1, nx - 1):
-            # 计算梯度
-            grad_x = (h_surface[i, j + 1] - h_surface[i, j - 1]) / (2.0 * dx)
-            grad_y = (h_surface[i + 1, j] - h_surface[i - 1, j]) / (2.0 * dy)
-
-            # 面积因子 = sqrt(1 + |∇h|²)
-            area_factors[i, j] = np.sqrt(1.0 + grad_x * grad_x + grad_y * grad_y)
-
-    # 边界处理（保持为1）
-    area_factors[0, :] = 1.0
-    area_factors[-1, :] = 1.0
-    area_factors[:, 0] = 1.0
-    area_factors[:, -1] = 1.0
-
-    return area_factors
 
 @jit(nopython=True, parallel=True, fastmath=True)
-def rk4_step_parallel(n_old, f_surface, dt, k_phi_n0, tau_inv, sigma, n0_inv,
+def rk4_step_parallel(n_old, f_surface, dt, k_phi, tau_inv, sigma, n0_inv,
                       D_surf_factor, dx, dy, h_surface=None):  # 添加h_surface参数
     """并行RK4步进 - 增强版（支持斜面吸附）"""
 
     def compute_rhs(n_current, f_surf):
         # 如果提供了高度场，计算面积因子
-        if h_surface is not None:
-            area_factors = compute_area_factors(h_surface, dx, dy)
-            adsorption = k_phi_n0 * (1.0 - n_current * n0_inv) * area_factors
-            desorption = n_current * tau_inv * area_factors  # 解吸也按面积增强
-        else:
-            # 兼容旧代码
-            adsorption = k_phi_n0 * (1.0 - n_current * n0_inv)
-            desorption = n_current * tau_inv
-
+        adsorption = k_phi * (1.0 - n_current * n0_inv)
+        desorption = n_current * tau_inv
         dissociation = sigma * f_surf * n_current
         reaction = adsorption - desorption - dissociation
         diffusion = D_surf_factor * laplace_2d_parallel(n_current, dx, dy)
@@ -200,32 +171,31 @@ def rk4_step_parallel(n_old, f_surface, dt, k_phi_n0, tau_inv, sigma, n0_inv,
     return n_old + (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
 
 
+from numba import jit
+import numpy as np
+
+
 @jit(nopython=True, fastmath=True)
-def exponential_slope_enhancement(slope, slope_min=0.1, slope_max=10.0):
+def exponential_slope_enhancement(slope, slope_min=0.1):
     """
     斜率增强效应：基于物理的分段函数
-    - 0.1 ~ 5.6: 使用 1/cos(ax+b) 形式
-    - 5.6 ~ tan(85°): 线性增长到90%
-    - tan(85°) ~ tan(89°): 线性下降到1%
-    - > tan(89°): 返回0
+    - 0.1 ~ tan(80°): 使用 1/cos(ax+b) 形式
+    - tan(80°) ~ tan(85°): 线性下降到峰值的90%
+    - tan(85°) ~ tan(90°): 抛物线下降到0（85°为抛物线顶点）
+    - > tan(90°): 返回0
 
     注：保留slope_max参数以保持接口兼容性，但实际使用固定的分段点
     """
     # 关键斜率点
-    slope_transition1 = 5.6
+    slope_80deg = 5.67  # np.tan(np.radians(80))
     slope_85deg = 11.43  # np.tan(np.radians(85))
-    slope_89deg = 57.29  # np.tan(np.radians(89))
-
-    # 增强上限
-    target_value_at_5_6 = 2.5
 
     if slope < slope_min:
         return 1.0
 
-    # 第一段：0.1 到 5.6，使用 1/cos(ax+b) 形式
-    elif slope_min <= slope <= slope_transition1:
-        # 计算参数a和b
-        # arccos(1/2.5) ≈ 1.159279
+    # 第一段：0.1 到 tan(80°)，使用 1/cos(ax+b) 形式
+    elif slope_min <= slope <= slope_80deg:
+        # 计算参数a和b，使得在slope_min时接近1，在80°时达到峰值
         a = 1.159279 / 5.5  # ≈ 0.2108
         b = -0.1 * a  # ≈ -0.02108
 
@@ -235,76 +205,81 @@ def exponential_slope_enhancement(slope, slope_min=0.1, slope_max=10.0):
 
         # 避免除零错误
         if abs(cos_value) < 1e-10:
-            return target_value_at_5_6
+            return 10.0  # 返回一个大值作为极限
         return 1.0 / cos_value
 
-    # 第二段：tan(80°) 到 tan(85°)，线性增长到前一段终值的90%
-    elif slope_transition1 < slope <= slope_85deg:
-        # 计算5.6处的值（应该接近2.5）
+    # 第二段：tan(80°) 到 tan(85°)，线性下降
+    elif slope_80deg < slope <= slope_85deg:
+        # 计算80°处的值（峰值）
         a = 1.159279 / 5.5
         b = -0.1 * a
-        cos_val = np.cos(a * slope_transition1 + b)
-        if abs(cos_val) < 1e-10:
-            value_at_5_6 = target_value_at_5_6
+        cos_val_80 = np.cos(a * slope_80deg + b)
+        if abs(cos_val_80) < 1e-10:
+            value_at_80 = 10.0
         else:
-            value_at_5_6 = 1.0 / cos_val
+            value_at_80 = 1.0 / cos_val_80
+
+        # 85°时下降到峰值的90%
+        value_at_85 = value_at_80 * 0.9
 
         # 线性插值
-        value_at_85deg = value_at_5_6 * 0.9
-        t = (slope - slope_transition1) / (slope_85deg - slope_transition1)
-        return value_at_5_6 + t * (value_at_85deg - value_at_5_6)
+        t = (slope - slope_80deg) / (slope_85deg - slope_80deg)
+        return value_at_80 + t * (value_at_85 - value_at_80)
 
-    # 第三段：tan(85°) 到 tan(89°)，线性下降到1%
-    elif slope_85deg < slope <= slope_89deg:
-        # 计算tan(85°)处的值
+    # 第三段：tan(85°) 到 tan(90°)，抛物线下降到0
+    else:
+        # 计算80°和85°处的值
         a = 1.159279 / 5.5
         b = -0.1 * a
-        cos_val = np.cos(a * slope_transition1 + b)
-        if abs(cos_val) < 1e-10:
-            value_at_5_6 = target_value_at_5_6
+        cos_val_80 = np.cos(a * slope_80deg + b)
+        if abs(cos_val_80) < 1e-10:
+            value_at_80 = 10.0
         else:
-            value_at_5_6 = 1.0 / cos_val
-        value_at_85deg = value_at_5_6 * 0.9
+            value_at_80 = 1.0 / cos_val_80
 
-        # 线性插值下降到1%
-        value_at_89deg = value_at_85deg * 0.01
-        t = (slope - slope_85deg) / (slope_89deg - slope_85deg)
-        return value_at_85deg + t * (value_at_89deg - value_at_85deg)
+        value_at_85 = value_at_80 * 0.9
 
-    # 第四段：大于tan(89°)
-    else:
-        return 0.0   #使用三段函数
+        # 将斜率转换为角度
+        angle_current = np.arctan(slope)
+        angle_85 = np.radians(85)
+        angle_90 = np.radians(90)
+
+        # 如果角度达到或超过90度，返回0
+        if angle_current >= angle_90:
+            return 0.0
+
+        # 使用抛物线：顶点在85°，开口向下
+        # y = -a*(θ - 85°)² + value_at_85
+        # 在90°时：0 = -a*(90° - 85°)² + value_at_85
+        # 所以：a = value_at_85 / (90° - 85°)²
+
+        delta_to_90 = angle_90 - angle_85
+        a_coef = value_at_85 / (delta_to_90 ** 2)
+
+        # 计算当前角度的值
+        delta_from_85 = angle_current - angle_85
+        result = -a_coef * (delta_from_85 ** 2) + value_at_85
+
+        return max(0.0, result)
 
 
 @jit(nopython=True, parallel=True, fastmath=True)
 def apply_surface_effects_numba(f_surface, h_surface, weight_substrate, weight_deposit,
-                                sub_sigma1, dep_sigma1, depth_scale_factor, dx, dy,
-                                slope_min=0.1, slope_max=10.0):
+                                sub_sigma1, dep_sigma1, dx, dy,
+                                slope_min=0.1, slope_max=10.0,
+                                enable_slope_enhancement=True):  # 新增开关参数
     """
-    连续表面效应 - 删除gradient_factor，使用指数衰减
+    连续表面效应 - 支持可选的斜率增强
 
     Parameters:
     -----------
-    f_surface : np.ndarray
-        入射电子通量
-    h_surface : np.ndarray
-        表面高度
-    weight_substrate, weight_deposit : np.ndarray
-        材料权重
-    sub_sigma1, dep_sigma1 : float
-        基底和沉积物的第一个高斯参数sigma
-    depth_scale_factor : float
-        深度衰减尺度因子
-    dx, dy : float
-        网格间距
-    slope_min, slope_max : float
-        指数衰减的斜率范围
-    flux_min_factor : float
-        最小通量因子
+    enable_slope_enhancement : bool
+        是否启用指数斜率增强效应
     """
     ny, nx = f_surface.shape
     result = np.zeros_like(f_surface)
-
+    if not enable_slope_enhancement:
+        return f_surface
     for i in prange(ny):
         for j in range(nx):
             # 表面梯度计算
@@ -317,21 +292,14 @@ def apply_surface_effects_numba(f_surface, h_surface, weight_substrate, weight_d
                 grad_x = (h_surface[i, j + 1] - h_surface[i, j - 1]) / (2.0 * dx)
 
             surface_gradient = np.sqrt(grad_x * grad_x + grad_y * grad_y)
-            #指数斜率衰减
-            flux_decay_factor = exponential_slope_enhancement(surface_gradient,
-                                                        slope_min, slope_max)
 
-            # 深度因子
-            reference_sigma = (weight_substrate[i, j] * sub_sigma1 +
-                               weight_deposit[i, j] * dep_sigma1)
-            if reference_sigma == 0:
-                reference_sigma = sub_sigma1
+            # 根据开关决定是否应用斜率增强
+            if enable_slope_enhancement:
+                flux_decay_factor = exponential_slope_enhancement(surface_gradient, slope_min)
+            else:
+                flux_decay_factor = 1.0  # 不应用斜率增强，保持原始通量
 
-            depth_for_attenuation = max(h_surface[i, j], 0.0)
-            depth_factor = np.exp(-depth_for_attenuation /
-                                  (depth_scale_factor * reference_sigma))
-
-            # 最终通量：，使用flux_decay_factor和depth_factor
-            result[i, j] = f_surface[i, j] * flux_decay_factor * depth_factor
+            # 最终通量
+            result[i, j] = f_surface[i, j] * flux_decay_factor
 
     return result
