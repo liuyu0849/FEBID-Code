@@ -1,370 +1,475 @@
 #!/usr/bin/env python3
 """
-FEBID仿真基底几何模块
-支持自定义基底形状，包括矩形缺陷、凸起等
+FEBID仿真主控制器 - 精简版（无监控）
+添加了subloop间前驱体浓度重置功能
 
 Author: 刘宇
 Date: 2025/7
 """
 
 import numpy as np
-import matplotlib.pyplot as plt
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+import time
+import psutil
+from typing import Dict
 
-from data_structures import FLOAT_DTYPE
+from data_structures import (
+    GaussianParams, MaterialParams, QuadGaussianParams,
+    PhysicalParams, ScanInfo, FLOAT_DTYPE
+)
 from base_classes import ConfigValidator
+from scan_strategies import ScanPathGenerator
+from visualization_analysis import VisualizationAnalyzer
+from simulation_core_algorithms import (
+    calculate_quad_gaussian_flux_numba,
+    rk4_step_parallel,
+    apply_surface_effects_numba
+)
 
 
-@dataclass
-class RectangularDefect:
-    """矩形缺陷/特征定义"""
-    x1: float  # 左下角x坐标 [nm]
-    y1: float  # 左下角y坐标 [nm]
-    x2: float  # 右上角x坐标 [nm]
-    y2: float  # 右上角y坐标 [nm]
-    height_offset: float  # 相对基准平面的高度偏移 [nm] (正值=凸起, 负值=凹陷)
-    name: str = ""  # 特征名称（可选）
-
-
-@dataclass
-class SubstrateGeometry:
-    """基底几何配置"""
-    base_height: float = 0.0  # 基准平面高度 [nm]
-    rectangular_defects: List[RectangularDefect] = None  # 矩形缺陷列表
-
-    def __post_init__(self):
-        if self.rectangular_defects is None:
-            self.rectangular_defects = []
-
-
-class SubstrateGeometryGenerator:
-    """基底几何生成器"""
+class MemoryOptimizedFEBID:
+    """内存优化的FEBID仿真类 - 精简版（无监控）"""
 
     def __init__(self, config: Dict):
+        """初始化仿真参数"""
         self.config = config
-        self.geometry_config = config['geometry']
-        self.substrate_config = config.get('substrate_geometry', {})
+        self.physical_params = self._create_physical_params()
+        self.quad_gaussian_params = self._create_quad_gaussian_params()
+        self.scan_history = []
+        self.start_time = None
 
-        # 解析配置
-        self.substrate_geometry = self._parse_substrate_config()
+        # 初始化辅助模块
+        self.scan_generator = ScanPathGenerator(config)
+        self.visualizer = VisualizationAnalyzer(config)
+        self.validator = ConfigValidator()
 
-    def _parse_substrate_config(self) -> SubstrateGeometry:
-        """解析基底配置"""
-        base_height = self.substrate_config.get('base_height', 0.0)
-        defects_config = self.substrate_config.get('rectangular_defects', [])
+        # 表面传播配置
+        self.surface_config = config.get('surface_propagation', {})
+        self.enable_surface_propagation = self.surface_config.get('enable', False)
 
-        defects = []
-        for i, defect_config in enumerate(defects_config):
-            defect = RectangularDefect(
-                x1=defect_config['x1'],
-                y1=defect_config['y1'],
-                x2=defect_config['x2'],
-                y2=defect_config['y2'],
-                height_offset=defect_config['height_offset'],
-                name=defect_config.get('name', f'Defect_{i + 1}')
-            )
-            defects.append(defect)
+        # 前驱体浓度重置配置
+        self.reset_precursor_between_loops = config['scan'].get('reset_precursor_between_loops', False)
+        self.reset_precursor_between_subloops = config['scan'].get('reset_precursor_between_subloops', False)
 
-        return SubstrateGeometry(
-            base_height=base_height,
-            rectangular_defects=defects
+        # 预处理参数（默认启用Numba）
+        self._prepare_numba_params()
+        self._prepare_rk4_constants()
+
+        # 计算无电子束平衡浓度
+        self._calculate_equilibrium_concentration()
+
+        # print(f"✓ 仿真器初始化完成 {'(表面感知)' if self.enable_surface_propagation else '(2D模式)'}")
+        if self.reset_precursor_between_loops:
+            print(f"✓ 循环间前驱体重置已启用 (平衡浓度: {self.n_equilibrium:.4f} molecules/nm²)")
+        if self.reset_precursor_between_subloops:
+            print(f"✓ 子循环间前驱体重置已启用 (平衡浓度: {self.n_equilibrium:.4f} molecules/nm²)")
+
+    def _calculate_equilibrium_concentration(self):
+        """计算无电子束作用下的平衡前驱体浓度"""
+        # 在无电子束时，前驱体吸附和解吸达到平衡
+        # k * Phi * (1 - n/n0) = n/tau
+        # 解得: n_eq = k * Phi * tau * n0 / (1 + k * Phi * tau)
+        p = self.physical_params
+        self.n_equilibrium = p.k * p.Phi * p.tau * p.n0 / (p.n0 + p.k * p.Phi * p.tau)
+
+    def _prepare_rk4_constants(self):
+        """预计算RK4常量"""
+        p = self.physical_params
+        self.rk4_constants = {
+            'k_phi': p.k * p.Phi,
+            'tau_inv': 1.0 / p.tau,
+            'sigma': p.sigma,
+            'n0_inv': 1.0 / p.n0,
+            'D_surf_factor': p.D_surf
+        }
+
+    def run_simulation(self) -> Dict:
+        """运行主仿真"""
+        print("=== FEBID仿真开始 ===")
+
+        # 基础验证
+        self._validate_core_parameters()
+
+        # 生成扫描位置
+        scan_positions, scan_info = self.scan_generator.generate_scan_positions(self.config['scan'])
+        total_pixels = scan_info.total_pixels
+
+        print(f"扫描点数: {total_pixels:,}, 停留时间: {self.config['scan']['dwell_time'] * 1e6:.1f} μs")
+
+        # 初始化网格和表面
+        x_grid, y_grid, h_surface, n_surface = self._initialize_simulation_grid()
+
+        # 时间参数
+        dt = self.config['numerical']['dt']
+        dwell_time = self.config['scan']['dwell_time']
+        edge_repeat_times = self.config['scan']['edge_repeat_times']
+
+        # 显示配置
+        self._display_config(scan_positions)
+
+        print("\n开始仿真...")
+        self.start_time = time.time()
+
+        # 主仿真循环
+        h_surface, n_surface = self._run_main_simulation_loop(
+            scan_positions, scan_info, x_grid, y_grid, h_surface, n_surface,
+            dt, dwell_time, edge_repeat_times, total_pixels
         )
 
-    def generate_substrate_surface(self, x_grid: np.ndarray, y_grid: np.ndarray) -> np.ndarray:
-        """
-        生成基底表面高度分布
+        total_time = time.time() - self.start_time
 
-        Parameters:
-        -----------
-        x_grid : np.ndarray
-            X方向网格坐标
-        y_grid : np.ndarray
-            Y方向网格坐标
+        # 完成处理
+        self._finalize_simulation(h_surface, n_surface, total_time, scan_info,
+                                  x_grid, y_grid, total_pixels)
 
-        Returns:
-        --------
-        np.ndarray : 基底表面高度分布
-        """
-        # 创建网格
+        return self._prepare_results(x_grid, y_grid, h_surface, n_surface,
+                                     scan_positions, scan_info, total_time)
+
+    def _validate_core_parameters(self):
+        """核心参数验证"""
+        if not self.validator.validate_geometry_config(self.config['geometry']):
+            raise ValueError("几何配置错误")
+        if not self.validator.validate_scan_config(self.config['scan'], self.config['geometry']):
+            raise ValueError("扫描配置错误")
+        if not self.validator.validate_physical_config(self.config['physical']):
+            raise ValueError("物理参数错误")
+
+    def _initialize_simulation_grid(self):
+        """初始化仿真网格"""
+        geom = self.config['geometry']
+        x_grid = np.arange(geom['X_min'], geom['X_max'] + geom['dx'], geom['dx'], dtype=FLOAT_DTYPE)
+        y_grid = np.arange(geom['Y_min'], geom['Y_max'] + geom['dy'], geom['dy'], dtype=FLOAT_DTYPE)
+
         X_mesh, Y_mesh = np.meshgrid(x_grid, y_grid)
 
-        # 初始化为基准平面
-        h_substrate = np.full_like(X_mesh, self.substrate_geometry.base_height, dtype=FLOAT_DTYPE)
+        # 生成基底表面
+        if 'substrate_geometry' in self.config and self.config['substrate_geometry'].get('rectangular_defects'):
+            from substrate_geometry import SubstrateGeometryGenerator
+            substrate_generator = SubstrateGeometryGenerator(self.config)
+            h_surface = substrate_generator.generate_substrate_surface(x_grid, y_grid)
+            print(f"✓ 自定义基底已加载")
+        else:
+            h_surface = np.zeros_like(X_mesh, dtype=FLOAT_DTYPE)
+            print("✓ 平面基底已加载")
 
-        # 添加矩形特征
-        for defect in self.substrate_geometry.rectangular_defects:
-            mask = self._create_rectangular_mask(X_mesh, Y_mesh, defect)
-            h_substrate[mask] += defect.height_offset
+        # 初始前驱体覆盖度（使用平衡浓度）
+        n_surface = np.full_like(X_mesh, self.n_equilibrium, dtype=FLOAT_DTYPE)
 
-        return h_substrate
+        self.X_mesh = X_mesh
+        self.Y_mesh = Y_mesh
 
-    def _create_rectangular_mask(self, X_mesh: np.ndarray, Y_mesh: np.ndarray,
-                                 defect: RectangularDefect) -> np.ndarray:
-        """创建矩形区域掩码"""
-        # 确保坐标顺序正确
-        x_min, x_max = min(defect.x1, defect.x2), max(defect.x1, defect.x2)
-        y_min, y_max = min(defect.y1, defect.y2), max(defect.y1, defect.y2)
+        return x_grid, y_grid, h_surface, n_surface
 
-        mask = ((X_mesh >= x_min) & (X_mesh <= x_max) &
-                (Y_mesh >= y_min) & (Y_mesh <= y_max))
+    def _display_config(self, scan_positions):
+        """显示配置信息"""
+        edge_mask = scan_positions[:, 3] == 1
+        basic_mask = scan_positions[:, 3] == 0
 
-        return mask
+        print(f"🎯 扫描统计: 边缘点={np.sum(edge_mask)}, 基础点={np.sum(basic_mask)}")
+        print(f"🌊 计算模式: {'表面感知' if self.enable_surface_propagation else '传统2D'}")
 
-    def validate_substrate_config(self) -> bool:
-        """验证基底配置"""
-        try:
-            print("🔍 验证基底几何配置...")
+    def _run_main_simulation_loop(self, scan_positions, scan_info, x_grid, y_grid,
+                                  h_surface, n_surface, dt, dwell_time,
+                                  edge_repeat_times, total_pixels):
+        """主仿真循环 - 支持循环和子循环间重置前驱体浓度"""
+        current_subloop = 0
+        pixels_in_current_subloop = 0
+        rk4_const = self.rk4_constants
 
-            # 检查基本参数
-            if not isinstance(self.substrate_geometry.base_height, (int, float)):
-                print("❌ base_height必须是数值")
-                return False
+        # 获取扫描配置
+        scan_config = self.config['scan']
+        pixel_size_x = scan_config['pixel_size_x']
+        pixel_size_y = scan_config['pixel_size_y']
 
-            # 验证矩形缺陷
-            geom = self.geometry_config
-            simulation_bounds = (geom['X_min'], geom['X_max'], geom['Y_min'], geom['Y_max'])
+        # 计算循环参数
+        total_possible_steps = pixel_size_x * pixel_size_y  # 一个完整loop包含的subloop数
+        pixels_per_complete_loop = scan_info.base_pixels_per_subloop * total_possible_steps
 
-            for i, defect in enumerate(self.substrate_geometry.rectangular_defects):
-                if not self._validate_rectangular_defect(defect, simulation_bounds, i):
-                    return False
+        # 跟踪当前位置
+        current_loop_number = 0
+        current_subloop_in_loop = 0  # 当前loop内的subloop索引
+        last_subloop_idx = 0
+        last_loop_number = 0
 
-            print(f"✓ 基底配置验证通过: 基准高度={self.substrate_geometry.base_height} nm, "
-                  f"{len(self.substrate_geometry.rectangular_defects)} 个矩形特征")
-            return True
+        # 检查是否使用loop模式
+        using_loop_mode = scan_config.get('loop') is not None
 
-        except Exception as e:
-            print(f"❌ 基底配置验证失败: {e}")
-            return False
+        for pixel_idx in range(total_pixels):
+            # 获取当前subloop索引
+            current_pixel_subloop = scan_positions[pixel_idx, 2]
 
-    def _validate_rectangular_defect(self, defect: RectangularDefect,
-                                     simulation_bounds: Tuple[float, float, float, float],
-                                     index: int) -> bool:
-        """验证单个矩形缺陷"""
-        x_min_sim, x_max_sim, y_min_sim, y_max_sim = simulation_bounds
+            # 检测subloop变化
+            if current_pixel_subloop != last_subloop_idx:
+                # 新的subloop开始
+                if last_subloop_idx > 0:  # 不是第一个subloop
+                    # 计算当前loop编号
+                    if using_loop_mode:
+                        loop_num = (current_pixel_subloop - 1) // total_possible_steps + 1
+                        subloop_in_loop = (current_pixel_subloop - 1) % total_possible_steps + 1
 
-        # 检查坐标顺序
-        if defect.x1 == defect.x2 or defect.y1 == defect.y2:
-            print(f"❌ 矩形特征 {index + 1} ({defect.name}): 不能是零面积")
-            return False
+                        # 检测是否是新的loop开始
+                        if loop_num != last_loop_number and last_loop_number > 0:
+                            # 新的完整loop开始
+                            if self.reset_precursor_between_loops:
+                                n_surface.fill(self.n_equilibrium)
+                                print(f"🔄 Loop {loop_num} 开始，前驱体浓度已重置为平衡值")
+                            else:
+                                print(f"🔄 Loop {loop_num} 开始")
+                            current_loop_number = loop_num
+                            last_loop_number = loop_num
 
-        # 检查是否在仿真区域内
-        x_min, x_max = min(defect.x1, defect.x2), max(defect.x1, defect.x2)
-        y_min, y_max = min(defect.y1, defect.y2), max(defect.y1, defect.y2)
+                        # 检测是否需要在subloop间重置（独立判断）
+                        if self.reset_precursor_between_subloops:
+                            n_surface.fill(self.n_equilibrium)
+                            print(
+                                f"  📍 Loop {loop_num}, Subloop {subloop_in_loop}/{total_possible_steps}，前驱体浓度已重置")
+                    else:
+                        # subloop模式
+                        if self.reset_precursor_between_subloops:
+                            n_surface.fill(self.n_equilibrium)
+                            print(f"📍 Subloop {current_pixel_subloop} 开始，前驱体浓度已重置")
+                        else:
+                            print(f"📍 Subloop {current_pixel_subloop} 开始")
 
-        if (x_max < x_min_sim or x_min > x_max_sim or
-                y_max < y_min_sim or y_min > y_max_sim):
-            print(f"⚠️  矩形特征 {index + 1} ({defect.name}): 完全在仿真区域外")
+                last_subloop_idx = current_pixel_subloop
+                current_subloop = current_pixel_subloop
+                pixels_in_current_subloop = scan_info.pixels_per_subloop
 
-        # 检查高度偏移合理性
-        if abs(defect.height_offset) > 1000:  # 1微米限制
-            print(f"⚠️  矩形特征 {index + 1} ({defect.name}): 高度偏移 {defect.height_offset} nm 可能过大")
+            # 第一个subloop的特殊处理
+            if pixel_idx == 0:
+                current_subloop = 1
+                pixels_in_current_subloop = scan_info.pixels_per_subloop
+                last_subloop_idx = 1
+                if using_loop_mode:
+                    current_loop_number = 1
+                    last_loop_number = 1
+                    print(f"🔄 Loop 1 开始")
+                else:
+                    print(f"📍 Subloop 1 开始")
 
-        return True
+            # 获取扫描位置
+            beam_pos_x = scan_positions[pixel_idx, 0]
+            beam_pos_y = scan_positions[pixel_idx, 1]
+            is_edge_repeat = bool(scan_positions[pixel_idx, 3])
 
-    def get_substrate_statistics(self, h_substrate: np.ndarray,
-                                 x_grid: np.ndarray, y_grid: np.ndarray) -> Dict:
-        """获取基底统计信息"""
-        stats = {
-            'base_height': self.substrate_geometry.base_height,
-            'min_height': float(np.min(h_substrate)),
-            'max_height': float(np.max(h_substrate)),
-            'mean_height': float(np.mean(h_substrate)),
-            'height_range': float(np.max(h_substrate) - np.min(h_substrate)),
-            'num_defects': len(self.substrate_geometry.rectangular_defects),
-            'defect_details': []
+            # 计算停留时间
+            effective_dwell_time = dwell_time * (edge_repeat_times + 1) if is_edge_repeat else dwell_time
+            steps_per_dwell = int(effective_dwell_time / dt)
+
+            # 像素停留循环
+            for step in range(steps_per_dwell):
+                # 计算电子通量
+                f_surface = self._calculate_flux(beam_pos_x, beam_pos_y, h_surface)
+
+                # RK4步进
+                n_surface = rk4_step_parallel(
+                    n_surface, f_surface, dt,
+                    rk4_const['k_phi'], rk4_const['tau_inv'],
+                    rk4_const['sigma'], rk4_const['n0_inv'],
+                    rk4_const['D_surf_factor'],
+                    self.physical_params.dx, self.physical_params.dy,
+                    h_surface  # 新增参数
+                )
+
+                # 更新高度
+                scan_config = self.config['scan']
+                is_single_point = (scan_config['scan_x_start'] == scan_config['scan_x_end'] == 0 and
+                                   scan_config['scan_y_start'] == scan_config['scan_y_end'] == 0)
+
+                if is_single_point:
+                    scan_correction = 1.0  # 单点扫描不应用修正
+                else:
+                    scan_correction = self.config['physical'].get('scan_correction', 1.0)
+
+                deposition_rate = scan_correction * self.physical_params.DeltaV * self.physical_params.sigma * f_surface * n_surface
+                h_surface += deposition_rate * dt
+
+            # 记录历史（简化版：减少记录频率）
+            if pixel_idx % 100 == 0:  # 每100个点记录一次
+                self.scan_history.append([
+                    pixel_idx, pixel_idx + 1, beam_pos_x, beam_pos_y,
+                    np.max(h_surface), current_subloop, is_edge_repeat
+                ])
+
+            pixels_in_current_subloop -= 1
+
+            # 进度显示（简化版）
+            if pixel_idx % max(1, total_pixels // 10) == 0:
+                self._display_progress(pixel_idx + 1, total_pixels, h_surface,
+                                       (beam_pos_x, beam_pos_y))
+
+        return h_surface, n_surface
+
+    def _calculate_flux(self, beam_pos_x, beam_pos_y, h_surface):
+        """计算电子通量"""
+        X_flat = self.X_mesh.flatten().astype(np.float32)
+        Y_flat = self.Y_mesh.flatten().astype(np.float32)
+        h_flat = h_surface.flatten().astype(np.float32)
+
+        # 使用Numba并行计算
+        f_surface_flat = calculate_quad_gaussian_flux_numba(
+            X_flat, Y_flat, h_flat,
+            beam_pos_x, beam_pos_y,
+            self.sub_params_array, self.dep_params_array,
+            self.quad_gaussian_params.z_deposit,
+            self.enable_surface_propagation,
+            self.physical_params.dx, self.physical_params.dy,
+            self.X_mesh.shape
+        )
+
+        f_surface = f_surface_flat.reshape(self.X_mesh.shape)
+
+        # 应用表面效应
+        if self.enable_surface_propagation:
+            f_surface = self._apply_surface_effects(f_surface, h_surface)
+
+        return f_surface
+
+    def _apply_surface_effects(self, f_surface, h_surface):
+        """应用连续表面效应"""
+        surface_params = self.config.get('surface_effects', {
+            'slope_decay_min': 0.1,
+            'slope_decay_max': 10.0,
+            'enable_slope_enhancement': True,  # 默认启用
+        })
+
+        weight_substrate, weight_deposit = self._calculate_material_weights(h_surface)
+
+        # 获取sigma参数
+        sub = self.quad_gaussian_params.substrate
+        dep = self.quad_gaussian_params.deposit
+
+        f_surface_final = apply_surface_effects_numba(
+            f_surface, h_surface, weight_substrate, weight_deposit,
+            sub.gaussian1.sigma, dep.gaussian1.sigma,
+            self.physical_params.dx, self.physical_params.dy,
+            surface_params.get('slope_decay_min', 0.176),
+            surface_params.get('slope_decay_max', 10.0),
+            surface_params.get('enable_slope_enhancement', True)  # 新增参数传递
+        )
+
+        return np.maximum(f_surface_final, 0)
+
+    def _calculate_material_weights(self, h_surface):
+        """计算材料权重"""
+        z_deposit = self.quad_gaussian_params.z_deposit
+        weight_substrate = np.zeros_like(h_surface, dtype=FLOAT_DTYPE)
+        weight_deposit = np.zeros_like(h_surface, dtype=FLOAT_DTYPE)
+
+        # 凹陷和基准面：纯基底
+        baseline_mask = (h_surface <= 0)
+        weight_substrate[baseline_mask] = 1.0
+
+        # 过渡区域：基底-沉积物混合
+        transition_mask = (h_surface > 0) & (h_surface < z_deposit)
+        weight_substrate[transition_mask] = (z_deposit - h_surface[transition_mask]) / z_deposit
+        weight_deposit[transition_mask] = h_surface[transition_mask] / z_deposit
+
+        # 厚沉积：纯沉积物
+        deposit_mask = (h_surface >= z_deposit)
+        weight_deposit[deposit_mask] = 1.0
+
+        return weight_substrate, weight_deposit
+
+    def _display_progress(self, pixel_idx, total_pixels, h_surface, beam_pos):
+        """显示进度 - 简化版"""
+        progress_pct = pixel_idx / total_pixels * 100
+        max_height = np.max(h_surface)
+        memory_mb = psutil.Process().memory_info().rss / 1024 ** 2
+
+        print(f"进度: {progress_pct:.0f}% | 最大高度: {max_height:.3e} nm | "
+              f"位置: ({beam_pos[0]:.1f},{beam_pos[1]:.1f}) | 内存: {memory_mb:.0f}MB")
+
+    def _finalize_simulation(self, h_surface, n_surface, total_time, scan_info,
+                             x_grid, y_grid, total_pixels):
+        """完成仿真后处理"""
+        # 打印结果
+        self.visualizer.print_results(
+            h_surface, n_surface, total_time, scan_info, x_grid, y_grid,
+            self.quad_gaussian_params, self.physical_params
+        )
+
+    def _prepare_results(self, x_grid, y_grid, h_surface, n_surface,
+                         scan_positions, scan_info, total_time):
+        """准备结果"""
+        return {
+            'x_grid': x_grid,
+            'y_grid': y_grid,
+            'h_surface': h_surface,
+            'n_surface': n_surface,
+            'scan_positions': scan_positions,
+            'scan_history': np.array(self.scan_history),
+            'scan_info': scan_info,
+            'simulation_time': total_time,
+            'config': self.config
         }
 
-        # 计算每个缺陷的统计
-        X_mesh, Y_mesh = np.meshgrid(x_grid, y_grid)
+    # ========================================================================
+    # 工具方法
+    # ========================================================================
 
-        for defect in self.substrate_geometry.rectangular_defects:
-            mask = self._create_rectangular_mask(X_mesh, Y_mesh, defect)
-            defect_area = np.sum(mask) * self.geometry_config['dx'] * self.geometry_config['dy']
+    def _create_physical_params(self) -> PhysicalParams:
+        p = self.config['physical']
+        return PhysicalParams(
+            Phi=p['Phi'], tau=p['tau'], sigma=p['sigma'],
+            n0=p['n0'], DeltaV=p['DeltaV'], k=p['k'],
+            D_surf=p['D_surf'], dx=p['dx'], dy=p['dy']
+        )
 
-            defect_stats = {
-                'name': defect.name,
-                'height_offset': defect.height_offset,
-                'area': float(defect_area),
-                'x_range': [min(defect.x1, defect.x2), max(defect.x1, defect.x2)],
-                'y_range': [min(defect.y1, defect.y2), max(defect.y1, defect.y2)],
-                'type': 'elevation' if defect.height_offset > 0 else 'depression'
-            }
-            stats['defect_details'].append(defect_stats)
+    def _create_quad_gaussian_params(self):
+        """创建四高斯参数"""
+        qg = self.config['quad_gaussian']
 
-        return stats
+        substrate = MaterialParams(
+            gaussian1=GaussianParams(qg['substrate']['gaussian1']['sigma'],
+                                     qg['substrate']['gaussian1']['amplitude']),
+            gaussian2=GaussianParams(qg['substrate']['gaussian2']['sigma'],
+                                     qg['substrate']['gaussian2']['amplitude']),
+            gaussian3=GaussianParams(qg['substrate']['gaussian3']['sigma'],
+                                     qg['substrate']['gaussian3']['amplitude']),
+            gaussian4=GaussianParams(qg['substrate']['gaussian4']['sigma'],
+                                     qg['substrate']['gaussian4']['amplitude'])
+        )
 
-    def visualize_substrate(self, h_substrate: np.ndarray,
-                            x_grid: np.ndarray, y_grid: np.ndarray,
-                            save_path: str = None) -> None:
-        """可视化基底形状"""
-        X_mesh, Y_mesh = np.meshgrid(x_grid, y_grid)
+        deposit = MaterialParams(
+            gaussian1=GaussianParams(qg['deposit']['gaussian1']['sigma'],
+                                     qg['deposit']['gaussian1']['amplitude']),
+            gaussian2=GaussianParams(qg['deposit']['gaussian2']['sigma'],
+                                     qg['deposit']['gaussian2']['amplitude']),
+            gaussian3=GaussianParams(qg['deposit']['gaussian3']['sigma'],
+                                     qg['deposit']['gaussian3']['amplitude']),
+            gaussian4=GaussianParams(qg['deposit']['gaussian4']['sigma'],
+                                     qg['deposit']['gaussian4']['amplitude'])
+        )
 
-        fig = plt.figure(figsize=(14, 10))
+        return QuadGaussianParams(substrate, deposit, qg['z_deposit'])
 
-        # 3D表面图
-        ax1 = fig.add_subplot(221, projection='3d')
-        surf = ax1.plot_surface(X_mesh, Y_mesh, h_substrate,
-                                cmap='terrain', alpha=0.9)
-        ax1.set_xlabel('X Position [nm]')
-        ax1.set_ylabel('Y Position [nm]')
-        ax1.set_zlabel('Height [nm]')
-        ax1.set_title('3D Substrate Topology')
-        plt.colorbar(surf, ax=ax1, shrink=0.6)
+    def _prepare_numba_params(self):
+        """预处理Numba参数"""
+        sub = self.quad_gaussian_params.substrate
+        dep = self.quad_gaussian_params.deposit
 
-        # 2D等高线图
-        ax2 = fig.add_subplot(222)
-        contour = ax2.contourf(X_mesh, Y_mesh, h_substrate, levels=20, cmap='terrain')
-        ax2.set_xlabel('X Position [nm]')
-        ax2.set_ylabel('Y Position [nm]')
-        ax2.set_title('Substrate Height Contour')
-        ax2.set_aspect('equal')
-        plt.colorbar(contour, ax=ax2)
+        self.sub_params_array = np.array([
+            sub.gaussian1.sigma, sub.gaussian1.amplitude,
+            sub.gaussian2.sigma, sub.gaussian2.amplitude,
+            sub.gaussian3.sigma, sub.gaussian3.amplitude,
+            sub.gaussian4.sigma, sub.gaussian4.amplitude
+        ], dtype=np.float32)
 
-        # 标记矩形特征
-        for defect in self.substrate_geometry.rectangular_defects:
-            x_min, x_max = min(defect.x1, defect.x2), max(defect.x1, defect.x2)
-            y_min, y_max = min(defect.y1, defect.y2), max(defect.y1, defect.y2)
+        self.dep_params_array = np.array([
+            dep.gaussian1.sigma, dep.gaussian1.amplitude,
+            dep.gaussian2.sigma, dep.gaussian2.amplitude,
+            dep.gaussian3.sigma, dep.gaussian3.amplitude,
+            dep.gaussian4.sigma, dep.gaussian4.amplitude
+        ], dtype=np.float32)
 
-            color = 'red' if defect.height_offset > 0 else 'blue'
-            ax2.add_patch(plt.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min,
-                                        fill=False, edgecolor=color, linewidth=2))
+    # ========================================================================
+    # 公共接口
+    # ========================================================================
 
-            # 添加标签
-            center_x, center_y = (x_min + x_max) / 2, (y_min + y_max) / 2
-            ax2.text(center_x, center_y, defect.name,
-                     ha='center', va='center', fontsize=8,
-                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+    def visualize_results(self, results):
+        """可视化结果"""
+        self.visualizer.visualize_results(results, self.quad_gaussian_params)
 
-        # 横截面图
-        ax3 = fig.add_subplot(223)
-        mid_y_idx = len(y_grid) // 2
-        ax3.plot(x_grid, h_substrate[mid_y_idx, :], 'b-', linewidth=2)
-        ax3.set_xlabel('X Position [nm]')
-        ax3.set_ylabel('Height [nm]')
-        ax3.set_title(f'X-Direction Cross Section (Y={y_grid[mid_y_idx]:.1f} nm)')
-        ax3.grid(True, alpha=0.3)
-
-        # 纵截面图
-        ax4 = fig.add_subplot(224)
-        mid_x_idx = len(x_grid) // 2
-        ax4.plot(y_grid, h_substrate[:, mid_x_idx], 'r-', linewidth=2)
-        ax4.set_xlabel('Y Position [nm]')
-        ax4.set_ylabel('Height [nm]')
-        ax4.set_title(f'Y-Direction Cross Section (X={x_grid[mid_x_idx]:.1f} nm)')
-        ax4.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"📊 基底可视化已保存: {save_path}")
-
-        plt.show()
-
-    def print_substrate_summary(self, stats: Dict) -> None:
-        """打印基底配置摘要"""
-        print("\n" + "=" * 60)
-        print("🏗️  基底几何配置摘要")
-        print("=" * 60)
-
-        print(f"基准平面高度: {stats['base_height']:.2f} nm")
-        print(f"最小高度: {stats['min_height']:.2f} nm")
-        print(f"最大高度: {stats['max_height']:.2f} nm")
-        print(f"高度范围: {stats['height_range']:.2f} nm")
-        print(f"矩形特征数量: {stats['num_defects']}")
-
-        if stats['num_defects'] > 0:
-            print(f"\n📋 矩形特征详情:")
-            for i, defect in enumerate(stats['defect_details']):
-                defect_type = "凸起" if defect['type'] == 'elevation' else "凹陷"
-                print(f"  {i + 1}. {defect['name']}: {defect_type} {abs(defect['height_offset']):.2f} nm")
-                print(f"     区域: X=[{defect['x_range'][0]:.1f}, {defect['x_range'][1]:.1f}] nm, "
-                      f"Y=[{defect['y_range'][0]:.1f}, {defect['y_range'][1]:.1f}] nm")
-                print(f"     面积: {defect['area']:.0f} nm²")
-
-        print("=" * 60)
-
-
-def create_example_substrate_config() -> Dict:
-    """创建示例基底配置"""
-    return {
-        'substrate_geometry': {
-            'base_height': 0.0,  # 基准平面高度
-            'rectangular_defects': [
-                {
-                    'name': 'Central_Elevation',
-                    'x1': -15, 'y1': -15, 'x2': 15, 'y2': 15,
-                    'height_offset': 8.0  # 8nm 凸起
-                },
-                {
-                    'name': 'Left_Depression',
-                    'x1': -35, 'y1': -10, 'x2': -25, 'y2': 10,
-                    'height_offset': -5.0  # 5nm 凹陷
-                },
-                {
-                    'name': 'Right_Step',
-                    'x1': 25, 'y1': -8, 'x2': 35, 'y2': 8,
-                    'height_offset': 3.0  # 3nm 台阶
-                },
-                {
-                    'name': 'Top_Trench',
-                    'x1': -20, 'y1': 20, 'x2': 20, 'y2': 30,
-                    'height_offset': -2.0  # 2nm 沟槽
-                }
-            ]
-        }
-    }
-
-
-def validate_substrate_geometry_config(config: Dict) -> bool:
-    """验证基底几何配置（独立函数）"""
-    try:
-        if 'substrate_geometry' not in config:
-            print("✓ 使用默认平面基底（无自定义几何）")
-            return True
-
-        generator = SubstrateGeometryGenerator(config)
-        return generator.validate_substrate_config()
-
-    except Exception as e:
-        print(f"❌ 基底几何配置验证失败: {e}")
-        return False
-
-
-if __name__ == "__main__":
-    """示例用法"""
-    print("🔬 FEBID基底几何模块演示")
-
-    # 创建示例配置
-    example_config = {
-        'geometry': {
-            'X_min': -50, 'X_max': 50, 'Y_min': -50, 'Y_max': 50,
-            'dx': 1, 'dy': 1
-        }
-    }
-    example_config.update(create_example_substrate_config())
-
-    # 创建基底生成器
-    generator = SubstrateGeometryGenerator(example_config)
-
-    # 验证配置
-    if generator.validate_substrate_config():
-        # 生成网格
-        x_grid = np.arange(-50, 51, 1, dtype=FLOAT_DTYPE)
-        y_grid = np.arange(-50, 51, 1, dtype=FLOAT_DTYPE)
-
-        # 生成基底
-        h_substrate = generator.generate_substrate_surface(x_grid, y_grid)
-
-        # 获取统计信息
-        stats = generator.get_substrate_statistics(h_substrate, x_grid, y_grid)
-        generator.print_substrate_summary(stats)
-
-        # 可视化
-        generator.visualize_substrate(h_substrate, x_grid, y_grid,
-                                      'substrate_geometry_example.png')
-
-        print("✅ 基底几何模块演示完成")
-    else:
-        print("❌ 配置验证失败")
+    def save_results(self, results):
+        """保存结果"""
+        self.visualizer.save_results(results, self.physical_params, self.quad_gaussian_params)
